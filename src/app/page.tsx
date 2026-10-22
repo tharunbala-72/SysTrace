@@ -1,7 +1,25 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Save, X } from "lucide-react";
+import { TopHeaderBar } from "@/components/workbench/TopHeaderBar";
+import { SyscallTriggerPane, type FormArgs } from "@/components/workbench/SyscallTriggerPane";
+import { CpuRingPipeline } from "@/components/workbench/CpuRingPipeline";
+import { KernelTablesPane } from "@/components/workbench/KernelTablesPane";
+import { StraceConsole } from "@/components/workbench/StraceConsole";
+import type { ExecutionResult, KernelState, MicroFrame, SyscallName } from "@/lib/kernelEngine";
+
+const defaults: Record<SyscallName, FormArgs> = { open: { pathname: "/home/user/notes.txt", flags: "O_RDWR", flagsCode: 2 }, read: { fd: 3, count: 64 }, write: { fd: 3, buffer: "Hello Kernel!" }, close: { fd: 3 }, fork: {}, getpid: {}, brk: { incrementBytes: 4096 }, kill: { pid: 1025, sig: 15 } };
+type ExecuteResponse = { success: boolean; result: ExecutionResult; frames: MicroFrame[]; state: KernelState };
+
 export default function Home() {
-  return (
-    <main className="min-h-screen bg-[#0A0D12] text-slate-200 flex items-center justify-center font-mono">
-      SysTrace Kernel Workbench Initializing...
-    </main>
-  );
+  const [state, setState] = useState<KernelState | null>(null); const [dbStatus, setDbStatus] = useState("memory"); const [syscall, setSyscall] = useState<SyscallName>("open"); const [args, setArgs] = useState<FormArgs>(defaults.open); const [frames, setFrames] = useState<MicroFrame[]>([]); const [activeStep, setActiveStep] = useState(0); const [result, setResult] = useState<ExecutionResult | null>(null); const [manual, setManual] = useState(false); const [speed, setSpeed] = useState(500); const [consoleOpen, setConsoleOpen] = useState(true); const [snapshotOpen, setSnapshotOpen] = useState(false); const [snapshotName, setSnapshotName] = useState("checkpoint-01"); const animation = useRef<ReturnType<typeof setInterval> | null>(null);
+  const load = useCallback(async () => { const response = await fetch("/api/kernel/state"); const payload = await response.json() as { state: KernelState; dbStatus: string }; setState(payload.state); setDbStatus(payload.dbStatus); }, []);
+  useEffect(() => { const startup = window.setTimeout(() => { void load(); }, 0); return () => { window.clearTimeout(startup); if (animation.current) clearInterval(animation.current); }; }, [load]);
+  const changeSyscall = (value: SyscallName) => { setSyscall(value); setArgs(defaults[value]); setFrames([]); setActiveStep(0); };
+  const execute = async (stepMode: boolean, forced?: { syscall: SyscallName; args: FormArgs }) => { if (animation.current) clearInterval(animation.current); const call = forced ?? { syscall, args }; const response = await fetch("/api/kernel/execute", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(call) }); const payload = await response.json() as ExecuteResponse; if (!payload.success) return; setState(payload.state); setFrames(payload.frames); setResult(payload.result); setManual(stepMode); setActiveStep(1); if (!stepMode) { let step = 1; animation.current = setInterval(() => { step += 1; setActiveStep(step); if (step >= 6 && animation.current) clearInterval(animation.current); }, speed); } };
+  const runPreset = async (name: string) => { const calls: Array<{ syscall: SyscallName; args: FormArgs }> = name === "file" ? [{ syscall: "open", args: defaults.open }, { syscall: "write", args: defaults.write }, { syscall: "read", args: { fd: 3, count: 80 } }, { syscall: "close", args: { fd: 3 } }] : name === "process" ? [{ syscall: "fork", args: {} }, { syscall: "getpid", args: {} }, { syscall: "kill", args: { pid: 1025, sig: 15 } }] : [{ syscall: "read", args: { fd: 99, count: 20 } }, { syscall: "open", args: { pathname: "/etc/passwd", flags: "O_RDWR", flagsCode: 2 } }]; for (const call of calls) { changeSyscall(call.syscall); await execute(false, call); await new Promise((resolve) => setTimeout(resolve, speed * 7)); } };
+  const reset = async () => { if (animation.current) clearInterval(animation.current); const response = await fetch("/api/kernel/reset", { method: "POST" }); const payload = await response.json() as { state: KernelState }; setState(payload.state); setFrames([]); setResult(null); setActiveStep(0); };
+  const snapshot = async () => { await fetch("/api/kernel/snapshots", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save", name: snapshotName }) }); setSnapshotOpen(false); };
+  return <main className="workbench"><TopHeaderBar state={state} dbStatus={dbStatus} onReset={() => void reset()} onPreset={(preset) => void runPreset(preset)} onSnapshot={() => setSnapshotOpen(true)}/><div className="workgrid"><SyscallTriggerPane syscall={syscall} args={args} onSyscall={changeSyscall} onArgs={setArgs} onExecute={(step) => void execute(step)} canStep={manual && activeStep < 6} onNext={() => setActiveStep((value) => Math.min(value + 1, 6))} speed={speed} onSpeed={() => setSpeed((value) => value === 250 ? 500 : value === 500 ? 900 : 250)}/><CpuRingPipeline state={state} frames={frames} activeStep={activeStep} result={result}/><KernelTablesPane state={state}/></div><StraceConsole state={state} expanded={consoleOpen} onToggle={() => setConsoleOpen((value) => !value)}/>{snapshotOpen && <div className="modal-backdrop"><div className="snapshot-modal"><button className="close-modal" onClick={() => setSnapshotOpen(false)}><X size={16}/></button><h2>KERNEL SNAPSHOT</h2><p>Persist current PCB, descriptor, VFS and trace state.</p><input value={snapshotName} onChange={(event) => setSnapshotName(event.target.value)} aria-label="Snapshot name"/><button className="execute" onClick={() => void snapshot()}><Save size={14}/> SAVE CHECKPOINT</button></div></div>}</main>;
 }
